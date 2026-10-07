@@ -59,6 +59,7 @@ We will now execute the container, overriding the default command to run the `in
 
 ```bash
 docker run \
+  -u root \
   -v ~/.config/gcloud:/tmp/.config/gcloud \
   -e GOOGLE_APPLICATION_CREDENTIALS=/tmp/.config/gcloud/application_default_credentials.json \
   -e GOOGLE_CLOUD_PROJECT=ggn-nmfs-osi-dev-1 \

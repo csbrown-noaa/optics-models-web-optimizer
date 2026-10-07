@@ -117,6 +117,15 @@ def main():
     try:
         wait_for_server()
         payload = download_json_from_gcs(input_file)
+        
+        # --- DYNAMIC PARAMETER INJECTION ---
+        # Inject the Airflow environment variables into the payload 
+        # so app.py knows where to upload the converted videos.
+        if "parameters" not in payload:
+            payload["parameters"] = {}
+        payload["parameters"]["OUTPUT_BUCKET"] = os.environ.get("OUTPUT_BUCKET", "")
+        payload["parameters"]["OUTPUT_FOLDER"] = os.environ.get("OUTPUT_FOLDER", "")
+        
         execute_prediction(payload)
     finally:
         print("[RUNNER] Shutting down background server...", flush=True)

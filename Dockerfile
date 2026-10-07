@@ -2,9 +2,9 @@ FROM python:3.10-slim
 
 WORKDIR /workspace
 
-# Install system dependencies (ffmpeg and libsm6 are heavily required by OpenCV and CV libs)
+# Install system dependencies (ffmpeg is required for our core logic)
 RUN apt-get update && \
-    apt-get install -y ffmpeg libsm6 libxext6 && \
+    apt-get install -y ffmpeg && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -29,3 +29,4 @@ EXPOSE 8080
 
 # Default command starts the HTTP server
 CMD ["python", "app.py"]
+

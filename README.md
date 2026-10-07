@@ -1,32 +1,27 @@
-# NOAA NMFS Optics Model Deployment Template ("Hello World")
+# NOAA NMFS Optics Video Web-Optimization Pipeline
 
-Welcome! This repository is a starting template for deploying your custom Computer Vision models into the Optics SI Airflow ecosystem. If you have an Ultralytics-family model or a VIAME-family model 🛑 **STOP!**, there are existing frameworks for that - please use those - it's easier that way. :)
+Welcome! This repository houses the Video Web-Optimization pipeline for the Optics SI Airflow ecosystem. It runs as an isolated Docker container, exposes an HTTP endpoint, and communicates with Google Cloud Storage (GCS).
 
-Our infrastructure requires models to run inside isolated Docker containers, expose an HTTP endpoint, and communicate with Google Cloud Storage (GCS). We have pre-written most of this infrastructure for you, so you can just focus on importing your model and getting predictions into the expected shape.
+This pipeline automatically inspects video files (e.g., `.avi`, `.mkv`, `.mov`, `.mp4`). If the video is already `h.264`, it quickly remuxes it. If it is another codec, it transcodes it to `h.264`. It guarantees `aac` audio (if an audio track exists) and applies `-movflags +faststart` so the resulting `.mp4` file is optimized for immediate web streaming.
 
----
+## 🏁 Step 1: Clone the Repository
 
-# 🟢 Phase 1: Deploying the "Hello World" Baseline
-
-Before writing any custom computer vision code, we are going to deploy this repository exactly as it is. It currently contains a "dummy" model that draws random bounding boxes. 
-
-By deploying this dummy model first, you will verify that your local Docker setup, Google Cloud permissions, and Airflow configurations are working perfectly.
-
-## 🏁 Step 1: Fork and Clone
-
-Before changing any code, fork this repository and clone it to your local machine (or Google Cloud Workstation). All subsequent commands assume you are running them from the root of this cloned directory.
+Clone this repository to your local machine (or Google Cloud Workstation). All subsequent commands assume you are running them from the root of this cloned directory.
 
 ```bash
-git clone https://github.com/csbrown-noaa/optics-models-hello-world.git
-cd optics-models-hello-world
+git clone https://github.com/csbrown-noaa/optics-models-web-optimizer.git
+cd optics-models-web-optimizer
 ```
 
-## 💻 Step 2: Test the Dummy Locally
+## 💻 Step 2: Test Locally
 
-Before deploying to the cloud, verify the dummy code works on your laptop/workstation.  We recommend using the Google Cloud workstations for this.  They already have `docker` and `gcloud` and other useful utilities installed.
+Before deploying to the cloud, verify the pipeline works on your laptop/workstation. We recommend using Google Cloud workstations for this, as they already have Docker and `gcloud` installed.
+
+We will test the pipeline exactly as it runs in the cloud: by passing a JSON payload URI and routing variables to the `inference_runner.py` bridge.
 
 **1. Authenticate with Google Cloud**
-Ensure you have Google Cloud credentials available locally so the container can download the test files:
+Ensure you have Google Cloud credentials available locally so the container can download and upload test files:
+
 ```bash
 gcloud auth application-default login
 ```
@@ -34,109 +29,81 @@ gcloud auth application-default login
 **2. Build the Docker Container**
 
 ```bash
-docker build -t optics-hello-world:latest .
+docker build -t video-optimizer:latest .
 ```
 
-**3. Run the Container**
-*(This maps your local GCP credentials into the container so it can access buckets)*
+**3. Prepare Your Test Payload**
+Create a minimal JSON payload file locally named `test_payload.json`. Notice there are no output parameters here—those are handled by the infrastructure environment variables!
 
-For macOS/Linux (or Cloud Workstations):
+🛑 **[ACTION REQUIRED]**: Replace the `gs://.../test.avi` string below with the actual Cloud Storage URI of a video you want to process!
+
+```json
+{
+  "instances": [
+    {
+      "input_path": "gs://nmfs-dev-uc1-sefsc/GFISHER/Video_data/2025/test.avi"
+    }
+  ]
+}
+```
+
+**4. Upload Your Payload to GCS**
+Because the inference runner downloads the payload from the cloud, you must upload this JSON file to a bucket you control before testing.
+
+🛑 **[ACTION REQUIRED]**: Upload `test_payload.json` to a folder in your GCP bucket (e.g., `gs://ggn-nmfs-osi-dev-1-data/my-user/inputs/test_payload.json`).
+
+**5. Run the Container**
+We will now execute the container, overriding the default command to run the `inference_runner.py` directly, just like Cloud Batch does. We will also inject the required environment variables.
+
+🛑 **[ACTION REQUIRED]**: Update the `INPUT_FILE` path to point to the JSON file you just uploaded, and change the `OUTPUT_FOLDER` to a location where you want the resulting `.mp4` saved.
 
 ```bash
-docker run -p 8080:8080 \
+docker run \
   -v ~/.config/gcloud:/tmp/.config/gcloud \
   -e GOOGLE_APPLICATION_CREDENTIALS=/tmp/.config/gcloud/application_default_credentials.json \
   -e GOOGLE_CLOUD_PROJECT=ggn-nmfs-osi-dev-1 \
-  optics-hello-world:latest
+  -e INPUT_FILE="gs://ggn-nmfs-osi-dev-1-data/my-user/inputs/test_payload.json" \
+  -e OUTPUT_BUCKET="ggn-nmfs-osi-dev-1-data" \
+  -e OUTPUT_FOLDER="my-user/output/" \
+  video-optimizer:latest python /workspace/inference_runner.py
 ```
 
-For Windows (using PowerShell):
-```bash
-docker run -p 8080:8080 -v ${env:APPDATA}\gcloud:/tmp/.config/gcloud -e GOOGLE_APPLICATION_CREDENTIALS=/tmp/.config/gcloud/application_default_credentials.json optics-hello-world:latest
-
-docker run -p 8080:8080 `
-  -v ${env:APPDATA}\gcloud:/tmp/.config/gcloud `
-  -e GOOGLE_APPLICATION_CREDENTIALS=/tmp/.config/gcloud/application_default_credentials.json `
-  -e GOOGLE_CLOUD_PROJECT=ggn-nmfs-osi-dev-1 `
-  optics-hello-world:latest
-```
-
-**4. Prepare Your Test Payloads**
-We have provided template JSON payloads in the local `test_payloads/` directory along with some sample media. 
-
-First, open the JSON files locally on your machine. Replace all the `<TODO_YOUR_FOLDER>` placeholders with a unique folder name you control (e.g., your username).
-
-Next, you must upload the local test images, the test video, and your newly modified `input_manifest.json` up to that exact Google Cloud Storage location (e.g., `gs://ggn-nmfs-osi-dev-1-data/scott/test-images/`). *Without this step, your local Docker container won't have anything to download during the test!*
-
-**5. Send Test Requests**
-In a new terminal (while your Docker container is still running), test the different data ingestion methods:
-
-```bash
-# Test 1: Single Video
-curl -X POST http://localhost:8080/predict \
-     -H "Content-Type: application/json" \
-     -d @test_payloads/test_payload_video.json
-
-# Test 2: Multiple Images
-curl -X POST http://localhost:8080/predict \
-     -H "Content-Type: application/json" \
-     -d @test_payloads/test_payload_images.json
-
-# Test 3: Using a Manifest
-curl -X POST http://localhost:8080/predict \
-     -H "Content-Type: application/json" \
-     -d @test_payloads/test_payload_manifest.json
-```
-
-If successful, your terminal will log the processing steps, and new KWCOCO files will appear in your GCS bucket!
+If successful, your terminal will log the runner downloading the JSON, the local web server spinning up, `ffmpeg` optimizing the video, and the new `.mp4` file being uploaded to your destination GCS folder!
 
 ## ☁️ Step 3: Deploy to Cloud
 
-Once you are happy with local testing, we will push this container to the Google Artifact Registry.
+Once you are happy with local testing, push this container to the Google Artifact Registry.
 
-***!!!!NB!!!!*** The Artifact Registry is where everyone's models lives.  By pushing your docker image to the registry, there is a risk that you may overwrite existing docker images.  Please be careful here.
+***!!!!NB!!!!*** The Artifact Registry is where everyone's models live. Be careful not to overwrite a production image.
 
 **1. Authenticate with Google Cloud**
-Didn't we just do this??!!  Yes, but we used this to get application credentials for the docker image.  Since the docker image is doing work **on your behalf**, it needs its own set of credentials.  This login is so that you can interact directly with gcloud, which is what we're doing now.
+
 ```bash
 gcloud auth login
 ```
 
-Let's list the existing images in the registry first:
-
-```bash
-gcloud artifacts packages list \
-  --project=ggn-nmfs-osi-dev-1 \
-  --location=us-central1 \
-  --repository=nmfs-dev-uc1-docker-repository
-```
-
-You should see optics-hello-world in here.  By deploying the image you just built, you are going to "cover up" the old image.  The old image will still be there somewhere, buried in the history, but the `optics-hello-world:latest` image that you just built will be the new image that everyone has access to in the Optics SI.  This is fine - that's what this image is for.  However, it is important to note that in general, this deployment process **replaces** existing images in the repo.
-
-Now that we've been thoroughly warned, let's move along.
+**2. Tag and Push**
 
 ```bash
 # Tag your image for the registry
-docker tag optics-hello-world:latest us-central1-docker.pkg.dev/ggn-nmfs-osi-dev-1/nmfs-dev-uc1-docker-repository/optics-hello-world:latest
+docker tag video-optimizer:latest us-central1-docker.pkg.dev/ggn-nmfs-osi-dev-1/nmfs-dev-uc1-docker-repository/video-optimizer:latest
 
 # Push it
-docker push us-central1-docker.pkg.dev/ggn-nmfs-osi-dev-1/nmfs-dev-uc1-docker-repository/optics-hello-world:latest
+docker push us-central1-docker.pkg.dev/ggn-nmfs-osi-dev-1/nmfs-dev-uc1-docker-repository/video-optimizer:latest
 ```
 
 ## ⚙️ Step 4: Hook it into Airflow
 
-To make your model available in the system, you normally must register it in the Airflow DAG.
+To make this pipeline available in the system, you must register it in the Airflow configuration.
 
-Download GCS `ggn-nmfs-osi-dev-1-data/configs/model_runtime_definitions.json` 
+Download GCS `gs://ggn-nmfs-osi-dev-1-data/configs/model_runtime_definitions.json`
 
-The entries in the json are for the various models. It's just a dictionary containing a hard-coded list of all of the available models and the relevant configuration for that model. See `ultralytics` as an example.
-
-Add your model to the json file, save, and upload it back to the original GCS folder.
+The entries in the JSON are for the various models and pipelines. Add the `video-optimizer` block to the JSON file, save, and upload it back to the original GCS folder.
 
 ```json
-    "optics-hello-world": {
+    "video-optimizer": {
         "region": "us-central1",
-        "image": "us-central1-docker.pkg.dev/ggn-nmfs-osi-dev-1/nmfs-dev-uc1-docker-repository/optics-hello-world:latest",
+        "image": "us-central1-docker.pkg.dev/ggn-nmfs-osi-dev-1/nmfs-dev-uc1-docker-repository/video-optimizer:latest",
         "cpu": 4,
         "memory": "16Gi",
         "gpu": 0,                        
@@ -148,64 +115,15 @@ Add your model to the json file, save, and upload it back to the original GCS fo
     }
 ```
 
-
-Note the "image" field.  This is precisely the image that you just built and pushed into the registry!  That tells the DAG which image to delegate to when you select the "optics-hello-world" model in the dropdown.
-
-Notes:
-```
- "gpu": 0,                         // Change to 1 if GPU only <br>
- "gpu_type": null,                 // Set to "nvidia-l4" if GPU only  <br>
- "machine_type": "c2-standard-4",  // Set to "g2-standard-4" if GPU only  <br>
- "timeout": 360000,                // 360000s = 4 days  <br>
- "args": ["/workspace/inference_runner.py"] // <--- DO NOT CHANGE THIS  <br>
- ```
-
+*Note: We use `c2-standard-4` here because ffmpeg video processing is heavily CPU-bound.*
 
 ## 🚀 Step 5: Triggering in Airflow
 
-When you run a job in Google Cloud Batch, the container boots up on an isolated, headless Virtual Machine. It doesn't have a user interface to accept manual inputs or local curl commands.
+Airflow triggers exactly like our local test did in Step 2.
 
-Because of this, **Airflow requires your JSON trigger payload to be uploaded to GCS first**. Airflow will pass the GCS URI of your JSON file to the headless VM, which will then download it and start the processing loop you just tested.  So, go back to find your favorite test payload that you created in Step 2.4, we are going to upload that to GCS.
+1. Go to Google Cloud console, search `Airflow`, select `Managed Airflow` -> `composer-env1` -> `Open Airflow UI` tab.
+2. Locate the `nmfs-optics-pipeline-longrunning-dag`, click **Trigger DAG w/ config**.
+3. Set the `model_type` to `video-optimizer`.
+4. Set the `input_file` parameter to the GCS URI of your uploaded JSON payload from Step 2 (e.g., `gs://ggn-nmfs-osi-dev-1-data/my-user/inputs/test_payload.json`).
+5. Change the output folder if desired, hit **Trigger**, and monitor your job's progress in the logs!
 
-1. Upload your finalized JSON configuration to GCS (e.g., `gs://ggn-nmfs-osi-dev-1-data/my-folder/test_payload_images.json`).
-2. Go to Google Cloud console, on search bar `Airflow`, select `Managed Airflow` ->  `composer-env1` -> `Open Airflow UI` tab
-3. Locate the `nmfs-optics-pipeline-longrunning-dag`, click **Trigger DAG w/ config**.
-4. Set the `model_type` to `optics-hello-world`.
-5. Set the `input_file` parameter to the GCS URI of your uploaded JSON payload.
-6. Hit **Trigger** and monitor your job's progress in the logs!
-7. To monitor the DAG progress, select `Managed Airflow` ->  `composer-env1` -> `DAGs`. Click you DAG file, see the list All DAG runs.
-8. To view the detailed log statements in your model, go to Google Cloud console, search `Batch`. When the job is actually scheduled to run, your job will appear on the Job list, select the job, click Logs tab
-
----
-
-# 🔬 Phase 2: Bring Your Own Model (BYOM)
-
-Congratulations! You have successfully executed a full end-to-end pipeline. Now it is time to replace the "dummy" code with your actual science.
-
-You will likely need to edit only the `model.py`, which is where your prediction code lives, and the `Dockerfile`, which handles the dependencies of your code and the other base dependencies of the project. The rest of the files (`app.py`, `inference_runner.py`) are abstract plumbing that handle the annoying parts: downloading videos from the cloud, starting web servers, managing memory, and uploading your final results back to the cloud.
-
-
-## 🧠 Step 6: Write Your Logic
-
-Open `model.py`. You will see the "Hello World" logic that assigns random bounding boxes. 
-
-Replace this logic with your actual framework. 
-*   Read the input images/videos from the provided `input_dir`.
-*   Load custom weights or thresholds from the `config` dictionary.
-*   Run your specific computer vision framework.
-*   Save your output to the `output_file_path` in an appropriate serialization format.  We recommend using the [KWCOCO (Kitware COCO)](https://kwcoco.readthedocs.io/en/latest/) JSON specification, as shown in the example code.  KWCOCO supports both images and video, and supports a wide range of annotation types such as classification, detection, and segmentation.  If we all stick to KWCOCO, then we can build interoperable pipelines that we only have to write once, and can share between groups.
-
-## 📦 Step 7: Update Dependencies
-
-If your model requires specific libraries (like `torch`, `tensorflow`, or `ultralytics`), you must add them to the `requirements.txt` file. We have already included OpenCV (`opencv-python-headless`) for you.
-
-If you need heavy system-level packages (like custom NVIDIA drivers or specific `apt-get` binaries), you can add those to the `Dockerfile`.
-
-## 🔄 Step 8: Re-build and Re-deploy
-
-Now that your custom code is in place, simply repeat Phase 1!
-1. Test it locally using `curl` (Step 2).
-2. Pick a different name for your docker image (not optics-hello-world).  Feel free to continue using optics-hello-world to test on.  Try not to clutter up the artifact registry with a bunch of `test_pipeline-model_v8` sort of thing.  We all have to share this space.
-3. Build and push a new version to the Artifact Registry (Step 3). Note: **Increment your version tag** (e.g., `v1.1`) so you don't overwrite your previous work!  We recommend pushing your latest image with the :latest tag that always points to the latest model.  This makes it so that you don't have to repeatedly update the DAG.
-4. Update the Airflow DAG `MODEL_JOB_MAP` to point to your `:latest` image (Step 3).
-5. Trigger the DAG!

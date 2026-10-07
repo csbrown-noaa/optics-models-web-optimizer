@@ -9,7 +9,6 @@ import signal
 import json
 import uuid
 import shutil
-from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, request, Response, jsonify
 from flask_cors import CORS
 from waitress import serve
@@ -55,7 +54,7 @@ def download_gcs_uri(client: storage.Client, uri: str, destination: str):
     blob = bucket.blob(blob_path)
     blob.download_to_filename(destination)
 
-def upload_gcs_uri(client: storage.Client, local_path: str, uri: str, content_type="application/json"):
+def upload_gcs_uri(client: storage.Client, local_path: str, uri: str, content_type="video/mp4"):
     """
     Uploads a local file to a GCS destination.
     
@@ -68,7 +67,7 @@ def upload_gcs_uri(client: storage.Client, local_path: str, uri: str, content_ty
     uri : str
         The full gs:// URI destination.
     content_type : str, optional
-        The MIME type of the file being uploaded (default is "application/json").
+        The MIME type of the file being uploaded (default is "video/mp4").
     """
     bucket_name = uri.replace("gs://", "").split("/")[0]
     blob_path = "/".join(uri.replace("gs://", "").split("/")[1:])
@@ -94,7 +93,11 @@ def predict():
         if not instances or not isinstance(instances, list):
             return jsonify({"error": "'instances' is required and must be a non-empty list"}), 400
     
+        # Extract the global parameters injected by inference_runner.py
         global_params = data.get("parameters", {})
+        output_bucket = global_params.get("OUTPUT_BUCKET")
+        output_folder = global_params.get("OUTPUT_FOLDER")
+
         results = []
 
         for instance in instances:
@@ -104,40 +107,34 @@ def predict():
             os.makedirs(inputs_dir, exist_ok=True)
             
             try:
-                # 1. Extract Configs
                 config = instance.get("config", {})
-                output_file = instance.get("output_file")
-                if not output_file:
-                    raise ValueError("Instance missing 'output_file' destination URI.")
                 
-                manifest_uri = config.get("input_manifest", global_params.get("input_manifest"))
+                # Input Data Parsing
+                input_path = instance.get("input_path")
+                if not input_path:
+                    input_files = instance.get("input_files", [])
+                    if input_files:
+                        input_path = input_files[0]
+
+                if not input_path:
+                    raise ValueError("No valid input file found in instance payload.")
+
+                print(f"[{run_id}] Downloading {input_path} to {inputs_dir}...")
+                original_filename = os.path.basename(input_path)
+                dest = os.path.join(inputs_dir, original_filename)
+                download_gcs_uri(storage_client, input_path, dest)
+
+                # Output Path Reconstruction
+                if not output_bucket or not output_folder:
+                    raise ValueError("OUTPUT_BUCKET or OUTPUT_FOLDER missing from parameters.")
                 
-                # 2. Input Data Ingestion
-                input_uris = []
-                if manifest_uri:
-                    print(f"[{run_id}] Downloading manifest {manifest_uri}...")
-                    manifest_local = os.path.join(run_dir, "manifest.json")
-                    download_gcs_uri(storage_client, manifest_uri, manifest_local)
-                    with open(manifest_local, 'r') as f:
-                        input_uris = json.load(f)
-                else:
-                    input_uris = instance.get("input_files", [])
+                name_without_ext, _ = os.path.splitext(original_filename)
+                new_filename = f"{name_without_ext}.mp4"
+                output_file = f"gs://{output_bucket}/{output_folder.strip('/')}/{new_filename}"
+                local_output = os.path.join(run_dir, new_filename)
 
-                if not input_uris:
-                    raise ValueError("No input files resolved from instance payload or manifest.")
-
-                print(f"[{run_id}] Downloading {len(input_uris)} input files to {inputs_dir}...")
-                with ThreadPoolExecutor(max_workers=16) as executor:
-                    for uri in input_uris:
-                        filename = os.path.basename(uri)
-                        dest = os.path.join(inputs_dir, filename)
-                        executor.submit(download_gcs_uri, storage_client, uri, dest)
-
-                # 3. Call User's Custom Model Logic
-                local_output = os.path.join(run_dir, "results.json")
-                print(f"[{run_id}] Delegating to user model.py...")
+                print(f"[{run_id}] Delegating to model.py for video processing...")
                 
-                # We pass the input directory, the expected output path, and the config.
                 model.run_inference(
                     input_dir=inputs_dir,
                     output_file_path=local_output,
@@ -147,7 +144,7 @@ def predict():
                 if not os.path.exists(local_output):
                     raise FileNotFoundError(f"model.py finished, but did not create {local_output}")
 
-                # 4. Result Upload
+                # Result Upload
                 print(f"[{run_id}] Uploading results to {output_file}...")
                 upload_gcs_uri(storage_client, local_output, output_file)
                 
@@ -158,7 +155,7 @@ def predict():
                 results.append({"status": "error", "error": str(inner_e)})
                 
             finally:
-                # 5. Strict Cleanup
+                # Strict Cleanup
                 print(f"[{run_id}] Cleaning up workspace {run_dir}...")
                 shutil.rmtree(run_dir, ignore_errors=True)
 
